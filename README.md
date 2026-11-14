@@ -17,8 +17,8 @@ ni crear ninguna cuenta. Los MP3 se guardan en la carpeta **Descargas/MP3**.
      (aparece porque el programa no tiene firma de pago, no porque tenga nada raro).
    - **Mac:** arrastra `DescargadorMP3` a *Aplicaciones* y ábrelo con clic derecho → **Abrir**.
      Si el Mac lo bloquea: *Ajustes del Sistema → Privacidad y seguridad →* **Abrir igualmente**.
-4. Se abre una página en tu navegador. Pega el enlace y descarga.
-   Para cerrar el programa, pulsa **Salir** (también se cierra solo unos minutos después de cerrar la pestaña).
+4. Se abre una ventana. Pega el enlace, elige la calidad y pulsa **Descargar MP3**.
+   Con **Cambiar carpeta…** eliges dónde se guardan los MP3. Para cerrar el programa, cierra la ventana.
 
 ## Importante
 

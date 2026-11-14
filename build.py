@@ -17,6 +17,10 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+try:
+    import tkinter  # noqa: F401  (la ventana de la app lo necesita)
+except ImportError:
+    sys.exit("Este Python no incluye tkinter; la app no tendría ventana.")
 import PyInstaller.__main__
 
 ROOT = Path(__file__).resolve().parent

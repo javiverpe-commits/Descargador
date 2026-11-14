@@ -3,7 +3,7 @@
 Descargador de audio a MP3 (uso personal).
 
 Pega un enlace (YouTube u otra web compatible con yt-dlp), elige la calidad
-y el audio se descarga y se convierte a MP3 en  ~/Downloads/MP3
+y el audio se descarga y se convierte a MP3.
 
 En la versión empaquetada (.exe / .app) ffmpeg y deno van incluidos: no hay
 que instalar nada. Desde el código fuente:  python3 descargador_mp3.py
@@ -16,47 +16,21 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
-import urllib.request
-import uuid
-import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import tkinter as tk
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
-
-PORT = int(os.environ.get("MP3_PORT", "8765"))
-CONFIG = Path.home() / ".descargador_mp3.json"
-
-
-def load_out_dir():
-    if os.environ.get("MP3_DIR"):
-        return Path(os.environ["MP3_DIR"])
-    try:
-        saved = json.loads(CONFIG.read_text(encoding="utf-8")).get("out_dir")
-        if saved:
-            return Path(saved)
-    except Exception:  # noqa: BLE001
-        pass
-    return Path.home() / "Downloads" / "MP3"
-
-
-OUT_DIR = load_out_dir()
+from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 
 import yt_dlp
 
-FROZEN = getattr(sys, "frozen", False)
 BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+CONFIG = Path.home() / ".descargador_mp3.json"
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+QUALITIES = [("320 kbps (máxima)", "320"), ("256 kbps", "256"),
+             ("192 kbps (recomendada)", "192"), ("128 kbps (ligera)", "128")]
 
 
-def log(*args):
-    """print() seguro: en la versión sin consola no hay stdout."""
-    try:
-        if sys.stdout:
-            print(*args, flush=True)
-    except Exception:  # noqa: BLE001
-        pass
-
-
+# ---------------------------------------------------------------- herramientas incluidas
 def find_ffmpeg():
     try:
         import imageio_ffmpeg  # incluye un ffmpeg estático para cada sistema
@@ -82,13 +56,31 @@ def find_deno():
 
 FFMPEG = find_ffmpeg()
 DENO = find_deno()
-LAST_PING = time.time()
-IDLE_LIMIT = 180  # segundos sin página abierta (y sin descargas) antes de cerrarse solo
 
-JOBS = {}
-LOCK = threading.Lock()
-ANSI = re.compile(r"\x1b\[[0-9;]*m")
-QUALITIES = {"128", "192", "256", "320"}
+
+# ---------------------------------------------------------------- carpeta de destino
+def load_out_dir():
+    if os.environ.get("MP3_DIR"):
+        return Path(os.environ["MP3_DIR"])
+    try:
+        saved = json.loads(CONFIG.read_text(encoding="utf-8")).get("out_dir")
+        if saved:
+            return Path(saved)
+    except Exception:  # noqa: BLE001
+        pass
+    return Path.home() / "Downloads" / "MP3"
+
+
+def check_writable(path):
+    """Devuelve None si se puede guardar en la carpeta, o el mensaje de error."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        test = path / ".escritura_prueba"
+        test.write_text("ok")
+        test.unlink()
+    except Exception as e:  # noqa: BLE001
+        return str(e)
+    return None
 
 
 class Quiet:
@@ -98,10 +90,10 @@ class Quiet:
     def error(self, msg): pass
 
 
-def run_job(job_id, url, quality, playlist):
-    job = JOBS[job_id]
+# ---------------------------------------------------------------- descarga (hilo aparte)
+def run_job(job, url, quality, playlist, out_dir):
     if not FFMPEG:
-        job["state"], job["message"] = "error", "No se encuentra ffmpeg, necesario para crear el MP3."
+        job.update(state="error", message="No se encuentra ffmpeg, necesario para crear el MP3.")
         return
 
     def hook(d):
@@ -119,9 +111,9 @@ def run_job(job_id, url, quality, playlist):
 
     opts = {
         "format": "bestaudio/best",
-        "outtmpl": str(OUT_DIR / "%(title).150s.%(ext)s"),
+        "outtmpl": str(out_dir / "%(title).150s.%(ext)s"),
         "noplaylist": not playlist,
-        **({"ffmpeg_location": FFMPEG} if FFMPEG else {}),
+        "ffmpeg_location": FFMPEG,
         **({"js_runtimes": {"deno": {"path": DENO}}} if DENO else {}),
         "quiet": True,
         "no_warnings": True,
@@ -140,295 +132,183 @@ def run_job(job_id, url, quality, playlist):
             job["title"] = f"{n} pistas de la lista «{info.get('title', '')}»"
         else:
             job["title"] = (info or {}).get("title", "")
-        job["state"], job["percent"], job["message"] = "done", 100, "¡Listo!"
+        job.update(state="done", percent=100, message="¡Listo!")
     except Exception as e:  # noqa: BLE001
-        job["state"] = "error"
-        job["message"] = ANSI.sub("", str(e)).strip()[:600] or "Error desconocido"
+        job.update(state="error", message=ANSI.sub("", str(e)).strip()[:600] or "Error desconocido")
 
 
-def set_out_dir(raw):
-    """Valida y guarda la carpeta de destino. Devuelve (ruta, error)."""
-    global OUT_DIR
-    raw = (raw or "").strip().strip('"')
-    if not raw:
-        return None, "Indica una carpeta."
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        return None, "Escribe la ruta completa de la carpeta (por ejemplo C:\\Users\\tu-nombre\\Música)."
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        test = path / ".escritura_prueba"
-        test.write_text("ok")
-        test.unlink()
-    except Exception as e:  # noqa: BLE001
-        return None, f"No se puede guardar en esa carpeta: {e}"
-    OUT_DIR = path
-    try:
-        CONFIG.write_text(json.dumps({"out_dir": str(path)}), encoding="utf-8")
-    except Exception:  # noqa: BLE001
-        pass
-    return str(path), None
+# ---------------------------------------------------------------- ventana
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Descargador MP3")
+        self.minsize(580, 400)
+        self.out_dir = load_out_dir()
+        self.job = None
 
+        pad = {"padx": 18}
+        root = ttk.Frame(self, padding=(0, 16, 0, 12))
+        root.pack(fill="both", expand=True)
 
-def choose_folder_dialog():
-    """Abre el selector de carpetas del sistema. Devuelve (ruta|None, error|None)."""
-    system = platform.system()
-    try:
-        if system == "Windows":
-            ps = (
-                "Add-Type -AssemblyName System.Windows.Forms;"
-                "$f=New-Object System.Windows.Forms.Form;$f.TopMost=$true;"
-                "$d=New-Object System.Windows.Forms.FolderBrowserDialog;"
-                "$d.Description='Elige la carpeta donde guardar los MP3';"
-                f"$d.SelectedPath='{str(OUT_DIR).replace(chr(39), chr(39) * 2)}';"
-                "if($d.ShowDialog($f) -eq 'OK'){[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
-                "[Console]::Out.Write($d.SelectedPath)}"
-            )
-            r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", ps],
-                               capture_output=True, creationflags=0x08000000, timeout=600)
-            out = r.stdout.decode("utf-8", "replace").strip()
-        elif system == "Darwin":
-            r = subprocess.run(
-                ["osascript", "-e",
-                 'POSIX path of (choose folder with prompt "Elige la carpeta donde guardar los MP3")'],
-                capture_output=True, timeout=600)
-            out = r.stdout.decode("utf-8", "replace").strip()
-        else:
-            zen = shutil.which("zenity")
-            if not zen:
-                return None, "No hay selector de carpetas disponible en este sistema."
-            r = subprocess.run([zen, "--file-selection", "--directory"], capture_output=True, timeout=600)
-            out = r.stdout.decode("utf-8", "replace").strip()
-    except Exception as e:  # noqa: BLE001
-        return None, f"No se pudo abrir el selector de carpetas: {e}"
-    return (out or None), None
+        title_font = tkfont.nametofont("TkDefaultFont").copy()
+        title_font.configure(size=title_font.cget("size") + 6, weight="bold")
+        ttk.Label(root, text="Descargador MP3", font=title_font).pack(anchor="w", **pad)
+        ttk.Label(root, text="Pega el enlace del vídeo y se guardará su audio como MP3.",
+                  foreground="#666").pack(anchor="w", pady=(0, 12), **pad)
 
+        ttk.Label(root, text="Enlace").pack(anchor="w", **pad)
+        row = ttk.Frame(root)
+        row.pack(fill="x", pady=(2, 10), **pad)
+        self.url = tk.StringVar()
+        self.entry = ttk.Entry(row, textvariable=self.url)
+        self.entry.pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Pegar", command=self.paste).pack(side="left", padx=(8, 0))
+        self.entry.bind("<Return>", lambda e: self.start())
+        self.entry.focus_set()
 
-def open_folder():
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    system = platform.system()
-    if system == "Windows":
-        os.startfile(OUT_DIR)  # type: ignore[attr-defined]
-    elif system == "Darwin":
-        subprocess.Popen(["open", str(OUT_DIR)])
-    else:
-        subprocess.Popen(["xdg-open", str(OUT_DIR)])
+        ttk.Label(root, text="Calidad del MP3").pack(anchor="w", **pad)
+        self.quality = ttk.Combobox(root, state="readonly", values=[q[0] for q in QUALITIES], width=26)
+        self.quality.current(2)
+        self.quality.pack(anchor="w", pady=(2, 8), **pad)
 
+        self.playlist = tk.BooleanVar(value=False)
+        ttk.Checkbutton(root, text="Si el enlace es de una lista de reproducción, descargar toda la lista",
+                        variable=self.playlist).pack(anchor="w", pady=(0, 10), **pad)
 
-PAGE = """<!doctype html>
-<html lang="es"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Descargador MP3</title>
-<style>
-  :root{color-scheme:light dark;--bg:#f6f5f2;--card:#fff;--fg:#1d1d1b;--mut:#6b6a66;--acc:#2b6cb0;--line:#dcdad4;--ok:#2f855a;--err:#c53030}
-  @media(prefers-color-scheme:dark){:root{--bg:#161615;--card:#222221;--fg:#ecebe7;--mut:#9b9a95;--acc:#63a4e8;--line:#3a3a38;--ok:#68d391;--err:#fc8181}}
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;display:grid;place-items:start center;min-height:100vh;padding:48px 16px}
-  main{width:100%;max-width:620px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px}
-  h1{font-size:22px;margin:0 0 4px} p.sub{margin:0 0 22px;color:var(--mut);font-size:14px}
-  label{display:block;font-size:13px;color:var(--mut);margin:14px 0 6px}
-  input[type=text],select{width:100%;padding:11px 12px;font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px}
-  input[type=text]:focus,select:focus{outline:2px solid var(--acc);border-color:transparent}
-  .row{display:flex;gap:12px;align-items:end;flex-wrap:wrap} .row>div{flex:1;min-width:160px}
-  .chk{display:flex;gap:8px;align-items:center;font-size:14px;margin-top:14px;color:var(--fg)}
-  button{font:inherit;border:0;border-radius:8px;padding:11px 18px;cursor:pointer;background:var(--acc);color:#fff;font-weight:600}
-  button.sec{background:transparent;color:var(--acc);border:1px solid var(--line);font-weight:500}
-  button:disabled{opacity:.5;cursor:default}
-  .actions{display:flex;gap:10px;margin-top:20px}
-  .bar{height:8px;background:var(--bg);border-radius:6px;overflow:hidden;margin-top:22px;display:none}
-  .bar>div{height:100%;width:0;background:var(--acc);transition:width .3s}
-  #msg{margin-top:10px;font-size:14px;min-height:22px;word-break:break-word}
-  .ok{color:var(--ok)} .err{color:var(--err)}
-  footer{margin-top:22px;font-size:12px;color:var(--mut)}
-</style></head><body><main>
-<h1>Descargador MP3</h1>
-<p class="sub">Pega el enlace del vídeo y se guarda el audio en <b id="dir"></b>
-  <a href="#" id="chg" style="color:var(--acc);white-space:nowrap">Cambiar carpeta</a></p>
-<div id="manual" style="display:none;margin:-10px 0 14px">
-  <input id="mdir" type="text" placeholder="Ruta completa de la carpeta">
-  <button class="sec" id="mok" style="margin-top:8px">Usar esta carpeta</button></div>
-<label for="url">Enlace</label>
-<input id="url" type="text" placeholder="https://www.youtube.com/watch?v=…" autofocus>
-<div class="row"><div>
-  <label for="q">Calidad MP3</label>
-  <select id="q">
-    <option value="320">320 kbps (máxima)</option>
-    <option value="256">256 kbps</option>
-    <option value="192" selected>192 kbps (recomendada)</option>
-    <option value="128">128 kbps (ligera)</option>
-  </select></div></div>
-<label class="chk"><input type="checkbox" id="pl"> Si el enlace es de una lista de reproducción, descargar toda la lista</label>
-<div class="actions"><button id="go">Descargar MP3</button><button class="sec" id="open">Abrir carpeta</button><button class="sec" id="quit" style="margin-left:auto">Salir</button></div>
-<div class="bar" id="bar"><div id="fill"></div></div>
-<div id="msg"></div>
-<footer>Úsalo solo con contenido que tengas derecho a descargar (tuyo, con licencia libre o con permiso).<br><span id="ver"></span></footer>
-</main>
-<script>
-const $=id=>document.getElementById(id); let timer=null;
-fetch('/info').then(r=>r.json()).then(j=>{$('dir').textContent=j.dir;$('ver').textContent='yt-dlp '+j.ytdlp});
-setInterval(()=>fetch('/ping').catch(()=>{}),5000);
-function show(t,c){$('msg').className=c||'';$('msg').textContent=t}
-async function post(path,body){
-  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
-  return r.json();
-}
-$('go').onclick=async()=>{
-  const url=$('url').value.trim();
-  if(!/^https?:\\/\\//i.test(url)){show('Pega un enlace que empiece por http:// o https://','err');return}
-  $('go').disabled=true; $('bar').style.display='block'; $('fill').style.width='2%'; show('Preparando…');
-  const j=await post('/download',{url,quality:$('q').value,playlist:$('pl').checked});
-  if(j.error){show(j.error,'err');$('go').disabled=false;return}
-  timer=setInterval(async()=>{
-    const s=await (await fetch('/status?id='+j.id)).json();
-    $('fill').style.width=(s.percent||2)+'%';
-    if(s.state==='running'){show(s.message)}
-    else{clearInterval(timer);$('go').disabled=false;
-      if(s.state==='done'){show('✓ '+(s.title||'Listo')+' — guardado en la carpeta MP3','ok');$('url').value=''}
-      else{show(s.message,'err')}}
-  },700);
-};
-$('url').addEventListener('keydown',e=>{if(e.key==='Enter')$('go').click()});
-$('open').onclick=()=>post('/open');
-$('chg').onclick=async e=>{e.preventDefault();show('Elige la carpeta en la ventana que se ha abierto…');
-  const j=await post('/choosedir');
-  if(j.error){show(j.error,'err');$('manual').style.display='block';return}
-  if(j.dir)$('dir').textContent=j.dir; show(j.cancelled?'':'✓ Carpeta cambiada','ok')};
-$('mok').onclick=async()=>{const j=await post('/setdir',{dir:$('mdir').value});
-  if(j.error){show(j.error,'err');return} $('dir').textContent=j.dir;$('manual').style.display='none';show('✓ Carpeta cambiada','ok')};
-$('quit').onclick=async()=>{await post('/quit');document.body.innerHTML='<p style="font:16px system-ui;padding:40px;text-align:center">Aplicación cerrada. Ya puedes cerrar esta pestaña.</p>'};
-</script></body></html>
-"""
+        ttk.Label(root, text="Guardar en").pack(anchor="w", **pad)
+        row = ttk.Frame(root)
+        row.pack(fill="x", pady=(2, 12), **pad)
+        self.dir_label = ttk.Label(row, text=str(self.out_dir), wraplength=330, justify="left")
+        self.dir_label.pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Abrir", command=self.open_folder).pack(side="right")
+        ttk.Button(row, text="Cambiar carpeta…", command=self.change_folder).pack(side="right", padx=(0, 6))
 
+        self.go = ttk.Button(root, text="Descargar MP3", command=self.start)
+        self.go.pack(anchor="w", pady=(0, 10), **pad)
+        self.bar = ttk.Progressbar(root, mode="determinate", maximum=100)
+        self.bar.pack(fill="x", **pad)
+        self.msg = ttk.Label(root, text="", wraplength=520, justify="left")
+        self.msg.pack(anchor="w", pady=(8, 0), **pad)
 
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
+        ttk.Label(root, foreground="#888", wraplength=540, justify="left",
+                  text="Úsalo solo con contenido que tengas derecho a descargar (tuyo, con licencia "
+                       f"libre o con permiso).   ·   yt-dlp {yt_dlp.version.__version__}"
+                  ).pack(side="bottom", anchor="w", **pad)
 
-    def _host_ok(self):
-        return self.headers.get("Host", "") in (f"127.0.0.1:{PORT}", f"localhost:{PORT}")
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.bind("<Configure>", self._rewrap)
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8"):
-        data = body if isinstance(body, bytes) else body.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
+        if os.environ.get("MP3_SELFTEST_URL"):  # solo para pruebas automáticas
+            self.after(500, self._selftest)
 
-    def _json(self, code, obj):
-        self._send(code, json.dumps(obj, ensure_ascii=False))
+    # --- utilidades de interfaz
+    def _rewrap(self, event):
+        if event.widget is self:
+            self.msg.configure(wraplength=max(300, event.width - 40))
 
-    def do_GET(self):
-        if not self._host_ok():
-            return self._json(403, {"error": "Host no permitido"})
-        parsed = urlparse(self.path)
-        if parsed.path == "/":
-            return self._send(200, PAGE, "text/html; charset=utf-8")
-        if parsed.path == "/info":
-            return self._json(200, {"dir": str(OUT_DIR), "ytdlp": yt_dlp.version.__version__})
-        if parsed.path == "/ping":
-            global LAST_PING
-            LAST_PING = time.time()
-            return self._json(200, {"app": "mp3dl"})
-        if parsed.path == "/status":
-            job = JOBS.get(parse_qs(parsed.query).get("id", [""])[0])
-            if not job:
-                return self._json(404, {"state": "error", "message": "Tarea no encontrada"})
-            return self._json(200, job)
-        self._json(404, {"error": "No encontrado"})
+    def show(self, text, color=""):
+        self.msg.configure(text=text, foreground=color)
 
-    def do_POST(self):
-        # Exigir JSON + Host local: evita que otras webs lancen descargas en tu equipo.
-        if not self._host_ok() or "application/json" not in self.headers.get("Content-Type", ""):
-            return self._json(403, {"error": "Petición no permitida"})
+    def paste(self):
         try:
-            length = min(int(self.headers.get("Content-Length", "0")), 10_000)
-            body = json.loads(self.rfile.read(length) or b"{}")
-        except (ValueError, json.JSONDecodeError):
-            return self._json(400, {"error": "Petición no válida"})
+            self.url.set(self.clipboard_get().strip())
+        except tk.TclError:
+            pass
 
-        path = urlparse(self.path).path
-        if path == "/open":
-            try:
-                open_folder()
-            except Exception as e:  # noqa: BLE001
-                return self._json(500, {"error": str(e)})
-            return self._json(200, {"ok": True})
+    def open_folder(self):
+        if check_writable(self.out_dir):
+            return self.show("No se puede abrir la carpeta de destino.", "#c53030")
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(self.out_dir)  # type: ignore[attr-defined]
+        elif system == "Darwin":
+            subprocess.Popen(["open", str(self.out_dir)])
+        else:
+            subprocess.Popen(["xdg-open", str(self.out_dir)])
 
-        if path == "/choosedir":
-            chosen, err = choose_folder_dialog()
-            if err:
-                return self._json(500, {"error": err})
-            if not chosen:
-                return self._json(200, {"cancelled": True, "dir": str(OUT_DIR)})
-            new, err = set_out_dir(chosen)
-            return self._json(400 if err else 200, {"error": err} if err else {"dir": new})
+    def change_folder(self):
+        start = self.out_dir if self.out_dir.exists() else Path.home()
+        chosen = filedialog.askdirectory(parent=self, initialdir=str(start),
+                                         title="Elige la carpeta donde guardar los MP3")
+        if chosen:
+            self.set_folder(Path(chosen))
 
-        if path == "/setdir":
-            new, err = set_out_dir(str(body.get("dir", "")))
-            return self._json(400 if err else 200, {"error": err} if err else {"dir": new})
+    def set_folder(self, path):
+        err = check_writable(path)
+        if err:
+            return self.show(f"No se puede guardar en esa carpeta: {err}", "#c53030")
+        self.out_dir = path
+        self.dir_label.configure(text=str(path))
+        try:
+            CONFIG.write_text(json.dumps({"out_dir": str(path)}), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+        self.show("✓ Carpeta cambiada", "#2f855a")
 
-        if path == "/quit":
-            self._json(200, {"ok": True})
-            threading.Timer(0.3, lambda: os._exit(0)).start()
+    # --- descarga
+    def start(self, quality=None):
+        if self.job and self.job["state"] == "running":
             return
+        url = self.url.get().strip()
+        if not re.match(r"^https?://", url, re.I):
+            return self.show("Pega un enlace que empiece por http:// o https://", "#c53030")
+        err = check_writable(self.out_dir)
+        if err:
+            return self.show(f"No se puede guardar en la carpeta de destino: {err}", "#c53030")
+        if quality is None:
+            quality = QUALITIES[self.quality.current()][1]
+        self.job = {"state": "running", "percent": 0, "message": "Preparando…", "title": ""}
+        self.go.state(["disabled"])
+        self.bar.configure(value=2)
+        self.show("Preparando…")
+        threading.Thread(target=run_job, daemon=True,
+                         args=(self.job, url, quality, self.playlist.get(), self.out_dir)).start()
+        self.after(200, self.poll)
 
-        if path == "/download":
-            url = str(body.get("url", "")).strip()
-            if not re.match(r"^https?://", url, re.I):
-                return self._json(400, {"error": "El enlace debe empezar por http:// o https://"})
-            quality = str(body.get("quality", "192"))
-            if quality not in QUALITIES:
-                quality = "192"
-            OUT_DIR.mkdir(parents=True, exist_ok=True)
-            job_id = uuid.uuid4().hex[:10]
-            with LOCK:
-                JOBS[job_id] = {"id": job_id, "state": "running", "percent": 0,
-                                "message": "Iniciando…", "title": ""}
-            threading.Thread(target=run_job, args=(job_id, url, quality, bool(body.get("playlist"))),
-                             daemon=True).start()
-            return self._json(200, {"id": job_id})
+    def poll(self):
+        job = self.job
+        self.bar.configure(value=job["percent"] or 2)
+        if job["state"] == "running":
+            self.show(job["message"])
+            return self.after(200, self.poll)
+        self.go.state(["!disabled"])
+        if job["state"] == "done":
+            self.bar.configure(value=100)
+            self.show(f"✓ {job['title'] or 'Listo'} — guardado en la carpeta de destino", "#2f855a")
+            self.url.set("")
+        else:
+            self.bar.configure(value=0)
+            self.show(job["message"], "#c53030")
 
-        self._json(404, {"error": "No encontrado"})
+    def on_close(self):
+        if self.job and self.job["state"] == "running":
+            if not messagebox.askyesno("Descarga en curso", "Hay una descarga en curso. ¿Salir de todas formas?"):
+                return
+        self.destroy()
 
+    # --- prueba automática (variables de entorno; no se usa en el día a día)
+    def _selftest(self):
+        self.url.set(os.environ["MP3_SELFTEST_URL"])
+        self.start()
+        self._selftest_wait()
 
-def already_running(port):
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/ping", timeout=2) as r:
-            return json.load(r).get("app") == "mp3dl"
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def watchdog():
-    """Se cierra solo cuando se cierra la pestaña (y no hay descargas en curso)."""
-    while True:
-        time.sleep(5)
-        busy = any(j["state"] == "running" for j in JOBS.values())
-        if not busy and time.time() - LAST_PING > IDLE_LIMIT:
-            os._exit(0)
+    def _selftest_wait(self):
+        if self.job["state"] == "running":
+            return self.after(300, self._selftest_wait)
+        out = os.environ.get("MP3_SELFTEST_OUT")
+        if out:
+            Path(out).write_text(json.dumps(self.job, ensure_ascii=False), encoding="utf-8")
+        self.after(200, self.destroy)
 
 
 def main():
-    global PORT
-    try:
-        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    except OSError:
-        if already_running(PORT):  # ya hay una ventana abierta: la reutilizamos
-            webbrowser.open(f"http://localhost:{PORT}")
-            return
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        PORT = server.server_address[1]
-    url = f"http://localhost:{PORT}"
-    log(f"Descargador MP3 funcionando en {url}\nLos MP3 se guardan en: {OUT_DIR}\n"
-        "Cierra esta ventana o pulsa Ctrl+C para salir.")
-    threading.Thread(target=watchdog, daemon=True).start()
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        log("\nHasta pronto.")
+    if platform.system() == "Windows":
+        try:  # ventana nítida en pantallas de alta resolución
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:  # noqa: BLE001
+            pass
+    App().mainloop()
 
 
 if __name__ == "__main__":
