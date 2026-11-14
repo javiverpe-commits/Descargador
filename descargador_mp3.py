@@ -221,7 +221,7 @@ def run_job(job, url, quality, playlist, out_dir):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Descargador MP3")
+        self.title("")  # sin texto en la barra de título: el nombre ya está en la ventana
         self.minsize(580, 400)
         try:  # icono propio en lugar de la pluma de Tk
             ico = BASE / "icono.ico"
