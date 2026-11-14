@@ -299,10 +299,35 @@ class App(tk.Tk):
         self.upd.pack(side="right", padx=(10, 0))
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.after(50, self._hide_titlebar_icon)
         self.bind("<Configure>", self._rewrap)
 
         if os.environ.get("MP3_SELFTEST_URL"):  # solo para pruebas automáticas
             self.after(500, self._selftest)
+
+    def _hide_titlebar_icon(self):
+        """Windows: quita el iconito de la barra de título (el de la barra de tareas se mantiene)."""
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.GetWindowLongW.restype = ctypes.c_long
+            user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            hwnd = user32.GetParent(self.winfo_id())
+            GWL_EXSTYLE, WS_EX_DLGMODALFRAME = -20, 0x0001
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_DLGMODALFRAME)
+            # SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED: redibuja el marco
+            user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0020)
+        except Exception:  # noqa: BLE001
+            pass  # si algo falla, la ventana queda como estaba
 
     # --- utilidades de interfaz
     def _rewrap(self, event):
