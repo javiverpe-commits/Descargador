@@ -299,14 +299,15 @@ class App(tk.Tk):
         self.upd.pack(side="right", padx=(10, 0))
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.after(50, self._hide_titlebar_icon)
+        self.after(300, self._hide_titlebar_icon)
         self.bind("<Configure>", self._rewrap)
 
         if os.environ.get("MP3_SELFTEST_URL"):  # solo para pruebas automáticas
             self.after(500, self._selftest)
 
     def _hide_titlebar_icon(self):
-        """Windows: quita el iconito de la barra de título (el de la barra de tareas se mantiene)."""
+        """Windows: deja en blanco el iconito de la barra de título.
+        El icono grande (barra de tareas y Alt+Tab) se mantiene con el pollito."""
         if os.name != "nt":
             return
         try:
@@ -315,17 +316,20 @@ class App(tk.Tk):
             user32 = ctypes.windll.user32
             user32.GetParent.argtypes = [wintypes.HWND]
             user32.GetParent.restype = wintypes.HWND
-            user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
-            user32.GetWindowLongW.restype = ctypes.c_long
-            user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
-            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
-                                            ctypes.c_int, ctypes.c_int, wintypes.UINT]
-            hwnd = user32.GetParent(self.winfo_id())
-            GWL_EXSTYLE, WS_EX_DLGMODALFRAME = -20, 0x0001
-            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_DLGMODALFRAME)
-            # SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED: redibuja el marco
-            user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0020)
+            user32.CreateIcon.argtypes = [wintypes.HINSTANCE, ctypes.c_int, ctypes.c_int, ctypes.c_ubyte,
+                                          ctypes.c_ubyte, ctypes.c_void_p, ctypes.c_void_p]
+            user32.CreateIcon.restype = wintypes.HICON
+            user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            user32.SendMessageW.restype = wintypes.LPARAM
+            hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+            # icono de 16x16 totalmente transparente (máscara AND a 1, imagen XOR a 0)
+            and_bits = (ctypes.c_ubyte * 32)(*([0xFF] * 32))
+            xor_bits = (ctypes.c_ubyte * 32)(*([0x00] * 32))
+            blank = user32.CreateIcon(None, 16, 16, 1, 1, and_bits, xor_bits)
+            if blank:
+                self._blank_icon = blank
+                WM_SETICON, ICON_SMALL = 0x0080, 0
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, blank)
         except Exception:  # noqa: BLE001
             pass  # si algo falla, la ventana queda como estaba
 
