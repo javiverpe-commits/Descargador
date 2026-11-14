@@ -8,23 +8,31 @@ y el audio se descarga y se convierte a MP3.
 En la versión empaquetada (.exe / .app) ffmpeg y deno van incluidos: no hay
 que instalar nada. Desde el código fuente:  python3 descargador_mp3.py
 """
+import hashlib
+import io
 import json
 import os
 import platform
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
 import tkinter as tk
+import urllib.request
+import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
 import yt_dlp
 
+FROZEN = getattr(sys, "frozen", False)
 BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 CONFIG = Path.home() / ".descargador_mp3.json"
+LIBS_DIR = Path(os.environ.get("MP3_LIBS_DIR", Path.home() / ".descargador_mp3_libs"))
+PACKAGES = {"yt-dlp": "yt_dlp", "yt-dlp-ejs": "yt_dlp_ejs"}  # nombre en PyPI -> módulo
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 QUALITIES = [("320 kbps (máxima)", "320"), ("256 kbps", "256"),
              ("192 kbps (recomendada)", "192"), ("128 kbps (ligera)", "128")]
@@ -56,6 +64,78 @@ def find_deno():
 
 FFMPEG = find_ffmpeg()
 DENO = find_deno()
+
+
+# ---------------------------------------------------------------- actualización de yt-dlp
+def vtuple(version):
+    return tuple(int(x) for x in re.findall(r"\d+", version))
+
+
+def use_updated_libs():
+    """Si hay una versión de yt-dlp descargada más nueva que la incluida, usa esa."""
+    global yt_dlp
+    try:
+        text = (LIBS_DIR / "yt_dlp" / "version.py").read_text(encoding="utf-8")
+        found = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", text)
+        if not found or vtuple(found.group(1)) <= vtuple(yt_dlp.version.__version__):
+            return
+        for name in [n for n in sys.modules if n.split(".")[0] in PACKAGES.values()]:
+            del sys.modules[name]
+        sys.path.insert(0, str(LIBS_DIR))
+        import yt_dlp as newer  # noqa: F811
+        yt_dlp = newer
+    except Exception:  # noqa: BLE001
+        pass  # ante cualquier problema, nos quedamos con la versión incluida
+
+
+use_updated_libs()
+
+
+def _download(url):
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        ctx = ssl.create_default_context()
+    req = urllib.request.Request(url, headers={"User-Agent": "DescargadorMP3"})
+    with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
+        return r.read()
+
+
+def update_libs():
+    """Busca en PyPI una versión más nueva de yt-dlp y la guarda en LIBS_DIR.
+    Devuelve (versión, True) si se ha actualizado o (versión_actual, False) si ya era la última."""
+    current = yt_dlp.version.__version__
+    metas = {pkg: json.loads(_download(f"https://pypi.org/pypi/{pkg}/json")) for pkg in PACKAGES}
+    latest = metas["yt-dlp"]["info"]["version"]
+    if vtuple(latest) <= vtuple(current):
+        return current, False
+    staging = LIBS_DIR.with_name(LIBS_DIR.name + "_nuevo")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    try:
+        for pkg, module in PACKAGES.items():
+            wheel = next((u for u in metas[pkg]["urls"]
+                          if u["packagetype"] == "bdist_wheel" and u["filename"].endswith("none-any.whl")), None)
+            if not wheel:
+                raise RuntimeError(f"No se encontró el paquete de {pkg}.")
+            data = _download(wheel["url"])
+            if hashlib.sha256(data).hexdigest() != wheel["digests"]["sha256"]:
+                raise RuntimeError("La descarga está dañada. Inténtalo de nuevo.")
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for name in z.namelist():
+                    if name.split("/")[0] != module:
+                        continue
+                    target = (staging / name).resolve()
+                    if staging.resolve() not in target.parents:
+                        raise RuntimeError("Archivo no válido en la actualización.")
+                    z.extract(name, staging)
+        shutil.rmtree(LIBS_DIR, ignore_errors=True)
+        staging.rename(LIBS_DIR)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return latest, True
 
 
 # ---------------------------------------------------------------- carpeta de destino
@@ -143,6 +223,11 @@ class App(tk.Tk):
         super().__init__()
         self.title("Descargador MP3")
         self.minsize(580, 400)
+        try:  # icono propio en lugar de la pluma de Tk
+            self._icon = tk.PhotoImage(file=str(BASE / "icono.png"))
+            self.iconphoto(True, self._icon)
+        except Exception:  # noqa: BLE001
+            pass
         self.out_dir = load_out_dir()
         self.job = None
 
@@ -190,10 +275,14 @@ class App(tk.Tk):
         self.msg = ttk.Label(root, text="", wraplength=520, justify="left")
         self.msg.pack(anchor="w", pady=(8, 0), **pad)
 
-        ttk.Label(root, foreground="#888", wraplength=540, justify="left",
+        foot = ttk.Frame(root)
+        foot.pack(side="bottom", fill="x", **pad)
+        ttk.Label(foot, foreground="#888", wraplength=380, justify="left",
                   text="Úsalo solo con contenido que tengas derecho a descargar (tuyo, con licencia "
-                       f"libre o con permiso).   ·   yt-dlp {yt_dlp.version.__version__}"
-                  ).pack(side="bottom", anchor="w", **pad)
+                       "libre o con permiso).").pack(side="left", fill="x", expand=True)
+        self.upd = ttk.Button(foot, text=f"Actualizar yt-dlp ({yt_dlp.version.__version__})",
+                              command=self.update_ytdlp)
+        self.upd.pack(side="right", padx=(10, 0))
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Configure>", self._rewrap)
@@ -280,6 +369,43 @@ class App(tk.Tk):
             self.bar.configure(value=0)
             self.show(job["message"], "#c53030")
 
+    def update_ytdlp(self):
+        if self.job and self.job["state"] == "running":
+            return self.show("Espera a que termine la descarga para actualizar.", "#c53030")
+        self.upd.state(["disabled"])
+        self.show("Buscando actualización de yt-dlp…")
+        self.upd_job = {"state": "running"}
+
+        def work():
+            try:
+                self.upd_job["version"], self.upd_job["changed"] = update_libs()
+                self.upd_job["state"] = "done"
+            except Exception as e:  # noqa: BLE001
+                self.upd_job.update(state="error", message=str(e)[:300])
+        threading.Thread(target=work, daemon=True).start()
+        self.after(300, self.poll_update)
+
+    def poll_update(self):
+        j = self.upd_job
+        if j["state"] == "running":
+            return self.after(300, self.poll_update)
+        self.upd.state(["!disabled"])
+        if j["state"] == "error":
+            return self.show("No se pudo actualizar: " + j["message"], "#c53030")
+        if not j["changed"]:
+            return self.show(f"✓ Ya tienes la última versión de yt-dlp ({j['version']}).", "#2f855a")
+        messagebox.showinfo("Actualizado", f"yt-dlp se ha actualizado a la versión {j['version']}.\n"
+                            "El programa se reiniciará ahora. Si no vuelve a abrirse, ábrelo de nuevo.")
+        self.restart()
+
+    def restart(self):
+        cmd = [sys.executable] if FROZEN else [sys.executable, str(Path(__file__).resolve())]
+        try:
+            subprocess.Popen(cmd, close_fds=True, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"})
+        except Exception:  # noqa: BLE001
+            return self.show("Actualizado. Cierra el programa y ábrelo de nuevo.", "#2f855a")
+        self.destroy()
+
     def on_close(self):
         if self.job and self.job["state"] == "running":
             if not messagebox.askyesno("Descarga en curso", "Hay una descarga en curso. ¿Salir de todas formas?"):
@@ -297,7 +423,8 @@ class App(tk.Tk):
             return self.after(300, self._selftest_wait)
         out = os.environ.get("MP3_SELFTEST_OUT")
         if out:
-            Path(out).write_text(json.dumps(self.job, ensure_ascii=False), encoding="utf-8")
+            Path(out).write_text(json.dumps({**self.job, "ytdlp": yt_dlp.version.__version__},
+                                            ensure_ascii=False), encoding="utf-8")
         self.after(200, self.destroy)
 
 

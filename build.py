@@ -64,7 +64,12 @@ args = [
     "--collect-all", "imageio_ffmpeg",
     "--collect-all", "certifi",
     "--add-data", f"{deno_path}{os.pathsep}bin",
+    "--add-data", f"{ROOT / 'icono.png'}{os.pathsep}.",
 ]
+if system == "Windows":
+    args += ["--icon", str(ROOT / "icono.ico")]
+elif system == "Darwin":
+    args += ["--icon", str(ROOT / "icono.icns")]
 if system in ("Windows", "Darwin"):
     args.append("--windowed")  # sin ventana de consola
 PyInstaller.__main__.run(args)
