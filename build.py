@@ -65,6 +65,8 @@ args = [
     "--collect-all", "certifi",
     "--add-data", f"{deno_path}{os.pathsep}bin",
     "--add-data", f"{ROOT / 'icono.png'}{os.pathsep}.",
+    "--add-data", f"{ROOT / 'icono.ico'}{os.pathsep}.",
+    "--add-data", f"{ROOT / 'icono_cabecera.png'}{os.pathsep}.",
 ]
 if system == "Windows":
     args += ["--icon", str(ROOT / "icono.ico")]

@@ -224,12 +224,17 @@ class App(tk.Tk):
         self.title("Descargador MP3")
         self.minsize(580, 400)
         try:  # icono propio en lugar de la pluma de Tk
-            self._icon = tk.PhotoImage(file=str(BASE / "icono.png"))
-            self.iconphoto(True, self._icon)
+            ico = BASE / "icono.ico"
+            if os.name == "nt" and ico.exists():
+                self.iconbitmap(default=str(ico))
+            else:
+                self._icon = tk.PhotoImage(file=str(BASE / "icono.png"))
+                self.iconphoto(True, self._icon)
         except Exception:  # noqa: BLE001
             pass
         self.out_dir = load_out_dir()
         self.job = None
+        self.upd_job = None
 
         pad = {"padx": 18}
         root = ttk.Frame(self, padding=(0, 16, 0, 12))
@@ -237,9 +242,18 @@ class App(tk.Tk):
 
         title_font = tkfont.nametofont("TkDefaultFont").copy()
         title_font.configure(size=title_font.cget("size") + 6, weight="bold")
-        ttk.Label(root, text="Descargador MP3", font=title_font).pack(anchor="w", **pad)
-        ttk.Label(root, text="Pega el enlace del vídeo y se guardará su audio como MP3.",
-                  foreground="#666").pack(anchor="w", pady=(0, 12), **pad)
+        head = ttk.Frame(root)
+        head.pack(fill="x", pady=(0, 12), **pad)
+        try:  # el pollito, grande, junto al título
+            self._logo = tk.PhotoImage(file=str(BASE / "icono_cabecera.png"))
+            ttk.Label(head, image=self._logo).pack(side="left", padx=(0, 16))
+        except Exception:  # noqa: BLE001
+            pass
+        heading = ttk.Frame(head)
+        heading.pack(side="left")
+        ttk.Label(heading, text="Descargador MP3", font=title_font).pack(anchor="w")
+        ttk.Label(heading, text="Pega el enlace del vídeo y se guardará su audio como MP3.",
+                  foreground="#666").pack(anchor="w")
 
         ttk.Label(root, text="Enlace").pack(anchor="w", **pad)
         row = ttk.Frame(root)
