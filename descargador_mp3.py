@@ -25,7 +25,22 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 PORT = int(os.environ.get("MP3_PORT", "8765"))
-OUT_DIR = Path(os.environ.get("MP3_DIR", Path.home() / "Downloads" / "MP3"))
+CONFIG = Path.home() / ".descargador_mp3.json"
+
+
+def load_out_dir():
+    if os.environ.get("MP3_DIR"):
+        return Path(os.environ["MP3_DIR"])
+    try:
+        saved = json.loads(CONFIG.read_text(encoding="utf-8")).get("out_dir")
+        if saved:
+            return Path(saved)
+    except Exception:  # noqa: BLE001
+        pass
+    return Path.home() / "Downloads" / "MP3"
+
+
+OUT_DIR = load_out_dir()
 
 import yt_dlp
 
@@ -131,6 +146,64 @@ def run_job(job_id, url, quality, playlist):
         job["message"] = ANSI.sub("", str(e)).strip()[:600] or "Error desconocido"
 
 
+def set_out_dir(raw):
+    """Valida y guarda la carpeta de destino. Devuelve (ruta, error)."""
+    global OUT_DIR
+    raw = (raw or "").strip().strip('"')
+    if not raw:
+        return None, "Indica una carpeta."
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        return None, "Escribe la ruta completa de la carpeta (por ejemplo C:\\Users\\tu-nombre\\Música)."
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        test = path / ".escritura_prueba"
+        test.write_text("ok")
+        test.unlink()
+    except Exception as e:  # noqa: BLE001
+        return None, f"No se puede guardar en esa carpeta: {e}"
+    OUT_DIR = path
+    try:
+        CONFIG.write_text(json.dumps({"out_dir": str(path)}), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    return str(path), None
+
+
+def choose_folder_dialog():
+    """Abre el selector de carpetas del sistema. Devuelve (ruta|None, error|None)."""
+    system = platform.system()
+    try:
+        if system == "Windows":
+            ps = (
+                "Add-Type -AssemblyName System.Windows.Forms;"
+                "$f=New-Object System.Windows.Forms.Form;$f.TopMost=$true;"
+                "$d=New-Object System.Windows.Forms.FolderBrowserDialog;"
+                "$d.Description='Elige la carpeta donde guardar los MP3';"
+                f"$d.SelectedPath='{str(OUT_DIR).replace(chr(39), chr(39) * 2)}';"
+                "if($d.ShowDialog($f) -eq 'OK'){[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+                "[Console]::Out.Write($d.SelectedPath)}"
+            )
+            r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", ps],
+                               capture_output=True, creationflags=0x08000000, timeout=600)
+            out = r.stdout.decode("utf-8", "replace").strip()
+        elif system == "Darwin":
+            r = subprocess.run(
+                ["osascript", "-e",
+                 'POSIX path of (choose folder with prompt "Elige la carpeta donde guardar los MP3")'],
+                capture_output=True, timeout=600)
+            out = r.stdout.decode("utf-8", "replace").strip()
+        else:
+            zen = shutil.which("zenity")
+            if not zen:
+                return None, "No hay selector de carpetas disponible en este sistema."
+            r = subprocess.run([zen, "--file-selection", "--directory"], capture_output=True, timeout=600)
+            out = r.stdout.decode("utf-8", "replace").strip()
+    except Exception as e:  # noqa: BLE001
+        return None, f"No se pudo abrir el selector de carpetas: {e}"
+    return (out or None), None
+
+
 def open_folder():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     system = platform.system()
@@ -169,7 +242,11 @@ PAGE = """<!doctype html>
   footer{margin-top:22px;font-size:12px;color:var(--mut)}
 </style></head><body><main>
 <h1>Descargador MP3</h1>
-<p class="sub">Pega el enlace del vídeo y se guarda el audio en <b id="dir"></b></p>
+<p class="sub">Pega el enlace del vídeo y se guarda el audio en <b id="dir"></b>
+  <a href="#" id="chg" style="color:var(--acc);white-space:nowrap">Cambiar carpeta</a></p>
+<div id="manual" style="display:none;margin:-10px 0 14px">
+  <input id="mdir" type="text" placeholder="Ruta completa de la carpeta">
+  <button class="sec" id="mok" style="margin-top:8px">Usar esta carpeta</button></div>
 <label for="url">Enlace</label>
 <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=…" autofocus>
 <div class="row"><div>
@@ -212,6 +289,12 @@ $('go').onclick=async()=>{
 };
 $('url').addEventListener('keydown',e=>{if(e.key==='Enter')$('go').click()});
 $('open').onclick=()=>post('/open');
+$('chg').onclick=async e=>{e.preventDefault();show('Elige la carpeta en la ventana que se ha abierto…');
+  const j=await post('/choosedir');
+  if(j.error){show(j.error,'err');$('manual').style.display='block';return}
+  if(j.dir)$('dir').textContent=j.dir; show(j.cancelled?'':'✓ Carpeta cambiada','ok')};
+$('mok').onclick=async()=>{const j=await post('/setdir',{dir:$('mdir').value});
+  if(j.error){show(j.error,'err');return} $('dir').textContent=j.dir;$('manual').style.display='none';show('✓ Carpeta cambiada','ok')};
 $('quit').onclick=async()=>{await post('/quit');document.body.innerHTML='<p style="font:16px system-ui;padding:40px;text-align:center">Aplicación cerrada. Ya puedes cerrar esta pestaña.</p>'};
 </script></body></html>
 """
@@ -272,6 +355,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 return self._json(500, {"error": str(e)})
             return self._json(200, {"ok": True})
+
+        if path == "/choosedir":
+            chosen, err = choose_folder_dialog()
+            if err:
+                return self._json(500, {"error": err})
+            if not chosen:
+                return self._json(200, {"cancelled": True, "dir": str(OUT_DIR)})
+            new, err = set_out_dir(chosen)
+            return self._json(400 if err else 200, {"error": err} if err else {"dir": new})
+
+        if path == "/setdir":
+            new, err = set_out_dir(str(body.get("dir", "")))
+            return self._json(400 if err else 200, {"error": err} if err else {"dir": new})
 
         if path == "/quit":
             self._json(200, {"ok": True})
