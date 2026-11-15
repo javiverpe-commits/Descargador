@@ -24,7 +24,7 @@ except ImportError:
 import PyInstaller.__main__
 
 ROOT = Path(__file__).resolve().parent
-NAME = "DescargadorMP3"
+NAME = "Pollito"
 
 system = platform.system()
 machine = platform.machine().lower()

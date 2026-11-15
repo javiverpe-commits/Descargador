@@ -97,7 +97,7 @@ def _download(url):
         ctx = ssl.create_default_context(cafile=certifi.where())
     except Exception:  # noqa: BLE001
         ctx = ssl.create_default_context()
-    req = urllib.request.Request(url, headers={"User-Agent": "DescargadorMP3"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Pollito"})
     with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
         return r.read()
 
@@ -251,11 +251,10 @@ class App(tk.Tk):
             pass
         heading = ttk.Frame(head)
         heading.pack(side="left")
-        ttk.Label(heading, text="Descargador MP3", font=title_font).pack(anchor="w")
-        ttk.Label(heading, text="Pega el enlace del vídeo y se guardará su audio como MP3.",
-                  foreground="#666").pack(anchor="w")
+        ttk.Label(heading, text="Pollito", font=title_font).pack(anchor="w")
+        ttk.Label(heading, text="Descargador de MP3", foreground="#666").pack(anchor="w")
 
-        ttk.Label(root, text="Enlace").pack(anchor="w", **pad)
+        ttk.Label(root, text="Pega aquí el enlace del vídeo").pack(anchor="w", **pad)
         row = ttk.Frame(root)
         row.pack(fill="x", pady=(2, 10), **pad)
         self.url = tk.StringVar()
