@@ -1,8 +1,21 @@
 # Pollito · Descargador de MP3
 
-Programa sencillo para guardar el audio de un vídeo (por ejemplo de YouTube) como MP3.
-Pegas el enlace, eliges la calidad y pulsas **Descargar MP3**. No hay que instalar nada
-ni crear ninguna cuenta. Los MP3 se guardan en la carpeta **Descargas/MP3**.
+Programa sencillo para guardar el audio de un vídeo (por ejemplo de YouTube) como WAV, FLAC o MP3.
+Pegas el enlace, eliges el formato y pulsas **Descargar audio**. No hay que instalar nada
+ni crear ninguna cuenta. Los archivos se guardan en la carpeta **Descargas/MP3**.
+
+## Formatos de salida
+
+Todos se guardan a 44,1 kHz y en estéreo. El archivo lleva la extensión que corresponde.
+
+| Formato | Para qué sirve | Tamaño orientativo |
+|---|---|---|
+| **WAV** (por defecto) | Sin compresión. Lo mejor para separar pistas o editar después. | ~10 MB por minuto |
+| **FLAC** | Compresión sin pérdida: mismo sonido que el WAV, archivo más pequeño. | ~6 MB por minuto |
+| **MP3 (320 kbps)** | Compatible con todo, pero con pérdida de calidad. | ~2,5 MB por minuto |
+
+El audio de YouTube ya viene comprimido con pérdida, así que WAV y FLAC no mejoran la calidad
+original: solo evitan perder más al convertir. Los tamaños son aproximados (FLAC varía según la música).
 
 ## Cómo usarlo
 
@@ -17,8 +30,8 @@ ni crear ninguna cuenta. Los MP3 se guardan en la carpeta **Descargas/MP3**.
      (aparece porque el programa no tiene firma de pago, no porque tenga nada raro).
    - **Mac:** arrastra `Pollito` a *Aplicaciones* y ábrelo con clic derecho → **Abrir**.
      Si el Mac lo bloquea: *Ajustes del Sistema → Privacidad y seguridad →* **Abrir igualmente**.
-4. Se abre una ventana. Pega el enlace, elige la calidad y pulsa **Descargar MP3**.
-   Con **Cambiar carpeta…** eliges dónde se guardan los MP3. Para cerrar el programa, cierra la ventana.
+4. Se abre una ventana. Pega el enlace, elige el formato y pulsa **Descargar audio**.
+   Con **Cambiar carpeta…** eliges dónde se guardan los archivos. Para cerrar el programa, cierra la ventana.
 
 ## Importante
 

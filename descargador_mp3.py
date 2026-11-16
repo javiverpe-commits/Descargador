@@ -34,8 +34,19 @@ CONFIG = Path.home() / ".descargador_mp3.json"
 LIBS_DIR = Path(os.environ.get("MP3_LIBS_DIR", Path.home() / ".descargador_mp3_libs"))
 PACKAGES = {"yt-dlp": "yt_dlp", "yt-dlp-ejs": "yt_dlp_ejs"}  # nombre en PyPI -> módulo
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-QUALITIES = [("320 kbps (máxima)", "320"), ("256 kbps", "256"),
-             ("192 kbps (recomendada)", "192"), ("128 kbps (ligera)", "128")]
+
+# Parámetros de audio fijos para todos los formatos
+SAMPLE_RATE, CHANNELS = 44100, 2
+FORMATS = {
+    "wav": {"name": "WAV", "ext": "wav", "codec": ["-c:a", "pcm_s16le"],
+            "label": "WAV · sin compresión (~10 MB/min)"},
+    "flac": {"name": "FLAC", "ext": "flac", "codec": ["-c:a", "flac"],
+             "label": "FLAC · sin pérdida (~6 MB/min)"},
+    "mp3": {"name": "MP3", "ext": "mp3", "codec": ["-c:a", "libmp3lame", "-b:a", "320k"],
+            "label": "MP3 · 320 kbps, con pérdida (~2,5 MB/min)"},
+}
+FORMAT_ORDER = ["wav", "flac", "mp3"]
+DEFAULT_FORMAT = "wav"
 
 
 # ---------------------------------------------------------------- herramientas incluidas
@@ -139,16 +150,26 @@ def update_libs():
 
 
 # ---------------------------------------------------------------- carpeta de destino
+def load_config():
+    try:
+        data = json.loads(CONFIG.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_config(**values):
+    try:
+        CONFIG.write_text(json.dumps({**load_config(), **values}), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def load_out_dir():
     if os.environ.get("MP3_DIR"):
         return Path(os.environ["MP3_DIR"])
-    try:
-        saved = json.loads(CONFIG.read_text(encoding="utf-8")).get("out_dir")
-        if saved:
-            return Path(saved)
-    except Exception:  # noqa: BLE001
-        pass
-    return Path.home() / "Downloads" / "MP3"
+    saved = load_config().get("out_dir")
+    return Path(saved) if saved else Path.home() / "Downloads" / "MP3"
 
 
 def check_writable(path):
@@ -170,11 +191,47 @@ class Quiet:
     def error(self, msg): pass
 
 
-# ---------------------------------------------------------------- descarga (hilo aparte)
-def run_job(job, url, quality, playlist, out_dir):
+# ---------------------------------------------------------------- conversión y descarga
+def convert_audio(src, fmt, title="", artist=""):
+    """Convierte `src` al formato elegido con los parámetros fijos (44,1 kHz, estéreo).
+    Siempre recodifica: nunca copia el audio tal cual. Devuelve la ruta del archivo final."""
+    spec = FORMATS[fmt]
+    out = src.with_suffix("." + spec["ext"])
+    tmp = out.with_name(out.stem + ".convirtiendo" + out.suffix)
+    cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
+           "-map", "0:a:0", "-vn", "-map_metadata", "-1",
+           "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS), *spec["codec"]]
+    if title:
+        cmd += ["-metadata", f"title={title}"]
+    if artist:
+        cmd += ["-metadata", f"artist={artist}"]
+    cmd.append(str(tmp))
+    result = subprocess.run(cmd, capture_output=True, creationflags=0x08000000 if os.name == "nt" else 0)
+    if result.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        detail = result.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["error desconocido"]
+        raise RuntimeError(f"No se pudo convertir a {spec['name']}: {detail[0]}")
+    if src != out and src.exists():
+        src.unlink()
+    os.replace(tmp, out)
+    return out
+
+
+def run_job(job, url, fmt, playlist, out_dir):
     if not FFMPEG:
-        job.update(state="error", message="No se encuentra ffmpeg, necesario para crear el MP3.")
+        job.update(state="error", message="No se encuentra ffmpeg, necesario para convertir el audio.")
         return
+    spec = FORMATS[fmt]
+    job["format"] = spec["name"]
+
+    from yt_dlp.postprocessor import PostProcessor  # tras una posible actualización de yt-dlp
+
+    class ConvertAudio(PostProcessor):
+        def run(self, info):
+            out = convert_audio(Path(info["filepath"]), fmt, info.get("title") or "",
+                                info.get("uploader") or info.get("channel") or "")
+            info["filepath"], info["ext"] = str(out), out.suffix.lstrip(".")
+            return [], info
 
     def hook(d):
         info = d.get("info_dict") or {}
@@ -187,7 +244,7 @@ def run_job(job, url, quality, playlist, out_dir):
             job["message"] = prefix + "Descargando audio…"
         elif d["status"] == "finished":
             job["percent"] = 100
-            job["message"] = prefix + "Convirtiendo a MP3…"
+            job["message"] = prefix + f"Convirtiendo a {spec['name']}…"
 
     opts = {
         "format": "bestaudio/best",
@@ -199,13 +256,10 @@ def run_job(job, url, quality, playlist, out_dir):
         "no_warnings": True,
         "logger": Quiet(),
         "progress_hooks": [hook],
-        "postprocessors": [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": quality},
-            {"key": "FFmpegMetadata", "add_metadata": True},
-        ],
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.add_post_processor(ConvertAudio(ydl), when="post_process")
             info = ydl.extract_info(url, download=True)
         if info and info.get("entries"):
             n = len([e for e in info["entries"] if e])
@@ -264,10 +318,15 @@ class App(tk.Tk):
         self.entry.bind("<Return>", lambda e: self.start())
         self.entry.focus_set()
 
-        ttk.Label(root, text="Calidad del MP3").pack(anchor="w", **pad)
-        self.quality = ttk.Combobox(root, state="readonly", values=[q[0] for q in QUALITIES], width=26)
-        self.quality.current(2)
-        self.quality.pack(anchor="w", pady=(2, 8), **pad)
+        ttk.Label(root, text="Formato de salida").pack(anchor="w", **pad)
+        self.format = ttk.Combobox(root, state="readonly", width=46,
+                                   values=[FORMATS[k]["label"] for k in FORMAT_ORDER])
+        saved = load_config().get("format", DEFAULT_FORMAT)
+        self.format.current(FORMAT_ORDER.index(saved if saved in FORMATS else DEFAULT_FORMAT))
+        self.format.bind("<<ComboboxSelected>>", lambda e: save_config(format=FORMAT_ORDER[self.format.current()]))
+        self.format.pack(anchor="w", pady=(2, 2), **pad)
+        ttk.Label(root, text="44,1 kHz · estéreo, en todos los formatos",
+                  foreground="#888").pack(anchor="w", pady=(0, 8), **pad)
 
         self.playlist = tk.BooleanVar(value=False)
         ttk.Checkbutton(root, text="Si el enlace es de una lista de reproducción, descargar toda la lista",
@@ -281,7 +340,7 @@ class App(tk.Tk):
         ttk.Button(row, text="Abrir", command=self.open_folder).pack(side="right")
         ttk.Button(row, text="Cambiar carpeta…", command=self.change_folder).pack(side="right", padx=(0, 6))
 
-        self.go = ttk.Button(root, text="Descargar MP3", command=self.start)
+        self.go = ttk.Button(root, text="Descargar audio", command=self.start)
         self.go.pack(anchor="w", pady=(0, 10), **pad)
         self.bar = ttk.Progressbar(root, mode="determinate", maximum=100)
         self.bar.pack(fill="x", **pad)
@@ -360,7 +419,7 @@ class App(tk.Tk):
     def change_folder(self):
         start = self.out_dir if self.out_dir.exists() else Path.home()
         chosen = filedialog.askdirectory(parent=self, initialdir=str(start),
-                                         title="Elige la carpeta donde guardar los MP3")
+                                         title="Elige la carpeta donde guardar el audio")
         if chosen:
             self.set_folder(Path(chosen))
 
@@ -370,14 +429,11 @@ class App(tk.Tk):
             return self.show(f"No se puede guardar en esa carpeta: {err}", "#c53030")
         self.out_dir = path
         self.dir_label.configure(text=str(path))
-        try:
-            CONFIG.write_text(json.dumps({"out_dir": str(path)}), encoding="utf-8")
-        except Exception:  # noqa: BLE001
-            pass
+        save_config(out_dir=str(path))
         self.show("✓ Carpeta cambiada", "#2f855a")
 
     # --- descarga
-    def start(self, quality=None):
+    def start(self, fmt=None):
         if self.job and self.job["state"] == "running":
             return
         url = self.url.get().strip()
@@ -386,14 +442,14 @@ class App(tk.Tk):
         err = check_writable(self.out_dir)
         if err:
             return self.show(f"No se puede guardar en la carpeta de destino: {err}", "#c53030")
-        if quality is None:
-            quality = QUALITIES[self.quality.current()][1]
+        if fmt is None:
+            fmt = FORMAT_ORDER[self.format.current()]
         self.job = {"state": "running", "percent": 0, "message": "Preparando…", "title": ""}
         self.go.state(["disabled"])
         self.bar.configure(value=2)
         self.show("Preparando…")
         threading.Thread(target=run_job, daemon=True,
-                         args=(self.job, url, quality, self.playlist.get(), self.out_dir)).start()
+                         args=(self.job, url, fmt, self.playlist.get(), self.out_dir)).start()
         self.after(200, self.poll)
 
     def poll(self):
@@ -405,7 +461,8 @@ class App(tk.Tk):
         self.go.state(["!disabled"])
         if job["state"] == "done":
             self.bar.configure(value=100)
-            self.show(f"✓ {job['title'] or 'Listo'} — guardado en la carpeta de destino", "#2f855a")
+            self.show(f"✓ {job['title'] or 'Listo'} — guardado como {job.get('format', '')} en la carpeta de destino",
+                      "#2f855a")
             self.url.set("")
         else:
             self.bar.configure(value=0)
@@ -457,6 +514,7 @@ class App(tk.Tk):
     # --- prueba automática (variables de entorno; no se usa en el día a día)
     def _selftest(self):
         self.url.set(os.environ["MP3_SELFTEST_URL"])
+        self.format.current(FORMAT_ORDER.index(os.environ.get("MP3_SELFTEST_FORMAT", DEFAULT_FORMAT)))
         self.start()
         self._selftest_wait()
 
